@@ -58,6 +58,9 @@ def load_vocabulary(vocabulary_file):
                     sensitive_term = sensitive_term.strip(); replacement_term = replacement_term.strip()
                     if not sensitive_term:
                         skipped += 1; logging.warning(f"Invalid line in vocabulary file: {raw}. Skipping."); continue
+                    # Later lines win. A term listed twice keeps only its last replacement,
+                    # and the dict preserves first insertion order, which also fixes the
+                    # order the replacement passes run in replace_terms.
                     vocabulary[sensitive_term] = replacement_term
                 else:
                     sensitive_term = raw.strip()
@@ -99,16 +102,32 @@ def replace_terms(input_file, vocabulary, output_file, randomize):
     except Exception as e:
         logging.error(f"Error processing file: {e}")
         return 1, 0
+    # Both branches below build the same pattern shape: the escaped term
+    # between two word boundaries, matched without case. The boundaries keep
+    # a term from matching inside a longer word, but a term that starts or
+    # ends with punctuation can fail to match at a real word edge, because a
+    # boundary needs a word character on one side. Matching ignores case and
+    # the replacement goes in as written, so the original case is lost.
+    # Passes run in vocabulary order over each other's output, so a
+    # replacement that contains a later sensitive term gets replaced again.
     total = 0
     if randomize:
         fake = Faker()
         for sensitive_term in vocabulary:
             replacement = fake.name()
             pattern = re.compile(r'\b' + re.escape(sensitive_term) + r'\b', re.IGNORECASE)
+            # The replacement goes through a lambda, not a replacement string, so
+            # backslashes and group references in the fake name are inserted
+            # literally instead of being read as escapes. One fake name is drawn per
+            # term, so every occurrence of that term gets the same name and the text
+            # stays consistent with itself.
             text, n = pattern.subn(lambda m, r=replacement: r, text)
             total += n
     else:
         for sensitive_term, replacement_term in vocabulary.items():
+            # Term only entries are skipped silently outside randomize mode. The same
+            # mixed vocabulary is a hard error with --randomize, checked at the top
+            # of this function before the input is even read.
             if replacement_term is None:
                 continue
             pattern = re.compile(r'\b' + re.escape(sensitive_term) + r'\b', re.IGNORECASE)
@@ -119,6 +138,9 @@ def replace_terms(input_file, vocabulary, output_file, randomize):
         print("No terms replaced.")
         return 1, 0
     try:
+        # Output is always utf-8, whatever encoding was detected for the input.
+        # The text was decoded to str on the way in, so this is a conversion,
+        # not a corruption, but a caller diffing bytes should know it happened.
         with open(output_file, 'w', encoding='utf-8') as outfile:
             outfile.write(text)
     except Exception as e:
